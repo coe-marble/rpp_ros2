@@ -192,6 +192,22 @@ target_link_libraries(my_node PRIVATE rpp_ros2::rpp_ros2)
 both RPP threading policies are accepted. To permit dynamic operations, construct
 your builder with its `allow_dynamic_components` option or per-slot policy.
 
+An optional `SlotManagerRosCallbacks` constructor argument observes successful
+lifecycle commands. Its `after_success(SlotOperation)` callback runs after the
+runtime operation and before the service response. It returns `CallbackResult`;
+a callback failure is reported without rolling back the already-completed runtime
+operation. The callback must not initiate another lifecycle operation on that
+runtime.
+
+```cpp
+rpp_ros2::SlotManagerRosCallbacks callbacks;
+callbacks.after_success = [](const rpp_ros2::SlotOperation & operation) {
+  // Update application state after operation.slot has changed.
+  return rpp::CallbackResult{};
+};
+rpp_ros2::SlotManagerRos ros_slots(*node, runtime, {}, std::move(callbacks));
+```
+
 ## Python
 
 ```python
@@ -210,6 +226,10 @@ finally:
 `namespace` defaults to `~`; `publish_period` is seconds and defaults to `1.0`.
 For dynamic operations, construct the RPP builder with
 `allow_dynamic_components=True` or a per-slot policy.
+
+Pass `after_success=` to the Python constructor to observe successful lifecycle
+commands. It receives a `SlotOperation` and returns `CallbackResult`; like the
+C++ callback, it runs after the runtime operation and before the response.
 
 In both languages a zero publication period disables the timer; commands still
 publish. `publish_status()` publishes all slots, or accepts a slot name to

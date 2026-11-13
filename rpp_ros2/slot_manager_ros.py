@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from threading import get_ident
+from typing import Callable
 
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.clock import Clock, ClockType
@@ -29,6 +31,17 @@ _STATES = {
 }
 
 
+@dataclass(frozen=True)
+class SlotOperation:
+    """A successful lifecycle operation completed by :class:`SlotManagerRos`."""
+
+    kind: str
+    slot: str
+    source: str = ""
+    target: str = ""
+    transfer_state: bool = False
+
+
 class SlotManagerRos:
     """Expose one service set and status topic per slot of a built runtime.
 
@@ -38,7 +51,8 @@ class SlotManagerRos:
     """
 
     def __init__(self, node: Node, runtime: ComponentRuntime | ScriptRuntime, *,
-                 namespace="~", publish_period=1.0, callback_group=None):
+                 namespace="~", publish_period=1.0, callback_group=None,
+                 after_success: Callable[[SlotOperation], CallbackResult] | None = None):
         if not namespace:
             raise ValueError("A nonempty ROS namespace is required")
         if not math.isfinite(publish_period) or publish_period < 0:
@@ -51,6 +65,7 @@ class SlotManagerRos:
         self._namespace = namespace.rstrip("/")
         self._group = group
         self._owner = get_ident()
+        self._after_success = after_success
         self._closed = False
         self._slots = {}
         self._timer = None
@@ -87,31 +102,41 @@ class SlotManagerRos:
         runtime = self._runtime
         commands = (
             ("configure", ConfigureComponent,
-             lambda req: runtime.configure_component(name, req.name)),
+             lambda req: runtime.configure_component(name, req.name),
+             lambda req: SlotOperation("configure", name, target=req.name)),
             ("activate", ActivateComponent,
-             lambda req: runtime.activate_component(name, req.name)),
+             lambda req: runtime.activate_component(name, req.name),
+             lambda req: SlotOperation("activate", name, target=req.name)),
             ("deactivate", DeactivateComponent,
              lambda req: runtime.deactivate_component(
-                 name, req.name, timeout=req.timeout_ms / 1000.0).result),
+                 name, req.name, timeout=req.timeout_ms / 1000.0).result,
+             lambda req: SlotOperation("deactivate", name, target=req.name)),
             ("cleanup", CleanupComponent,
-             lambda req: runtime.cleanup_component(name, req.name)),
+             lambda req: runtime.cleanup_component(name, req.name),
+             lambda req: SlotOperation("cleanup", name, target=req.name)),
             ("load", LoadComponent,
-             lambda req: self._load(name, req)),
+             lambda req: self._load(name, req),
+             lambda req: SlotOperation("load", name, target=req.name)),
             ("unload", UnloadComponent,
              lambda req: runtime.unload_component(
-                 name, req.name, timeout=req.timeout_ms / 1000.0)),
+                 name, req.name, timeout=req.timeout_ms / 1000.0),
+             lambda req: SlotOperation("unload", name, target=req.name)),
             ("reload", ReloadComponent,
              lambda req: runtime.reload_component(
                  name, req.name, transfer_state=req.transfer_state,
-                 timeout=req.timeout_ms / 1000.0)),
+                 timeout=req.timeout_ms / 1000.0),
+             lambda req: SlotOperation("reload", name, target=req.name,
+                                       transfer_state=req.transfer_state)),
             ("switch", SwitchComponents,
              lambda req: runtime.switch_component(
                  name, req.source, req.target, transfer_state=req.transfer_state,
-                 timeout=req.timeout_ms / 1000.0)),
+                 timeout=req.timeout_ms / 1000.0),
+             lambda req: SlotOperation("switch", name, source=req.source,
+                                       target=req.target, transfer_state=req.transfer_state)),
         )
-        for action, service_type, invoke in commands:
+        for action, service_type, invoke, describe in commands:
             entities["services"].append(self._node.create_service(
-                service_type, self._path(name, action), self._command(name, action, invoke),
+                service_type, self._path(name, action), self._command(name, action, invoke, describe),
                 callback_group=self._group))
         entities["services"].append(self._node.create_service(
             GetSlotStatus, self._path(name, "get_status"), self._get_status(name),
@@ -125,11 +150,17 @@ class SlotManagerRos:
                      if request.library_name else request.component or None)
         return self._runtime.load_component(slot, request.name, component)
 
-    def _command(self, slot, action, invoke):
+    def _command(self, slot, action, invoke, describe):
         def callback(request, response):
             try:
                 self._check_owner()
                 result = invoke(request)
+                if result.success and self._after_success is not None:
+                    synchronized = self._after_success(describe(request))
+                    if not synchronized.success:
+                        result = CallbackResult.failure(
+                            "Slot operation succeeded but its callback failed: " +
+                            synchronized.message)
             except Exception as error:
                 result = CallbackResult.failure(str(error))
             response.success = result.success

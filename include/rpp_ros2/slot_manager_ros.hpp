@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -39,6 +40,28 @@ struct SlotManagerRosOptions
   rclcpp::CallbackGroup::SharedPtr callback_group;
 };
 
+/// A completed lifecycle operation exposed through SlotManagerRos.
+struct SlotOperation
+{
+  enum class Kind {Configure, Activate, Deactivate, Cleanup, Load, Unload, Reload, Switch};
+
+  Kind kind;
+  std::string slot;
+  std::string source;
+  std::string target;
+  bool transfer_state{false};
+};
+
+/// Optional observer for successful ROS lifecycle operations.
+///
+/// The observer runs synchronously after the runtime operation and before its
+/// service response. It may update application state, but must not perform a
+/// further lifecycle operation on the same runtime.
+struct SlotManagerRosCallbacks
+{
+  std::function<rpp::CallbackResult(const SlotOperation &)> after_success;
+};
+
 /**
  * One ROS service set and status topic per slot of a built RPP runtime.
  * The node and runtime must outlive this helper; do not move the runtime while
@@ -59,8 +82,10 @@ class SlotManagerRos
 
 public:
   SlotManagerRos(
-    rclcpp::Node & node, Runtime & runtime, SlotManagerRosOptions options = {})
+    rclcpp::Node & node, Runtime & runtime, SlotManagerRosOptions options = {},
+    SlotManagerRosCallbacks callbacks = {})
   : node_(node), runtime_(runtime), options_(std::move(options)),
+    callbacks_(std::move(callbacks)),
     owner_(std::this_thread::get_id())
   {
     if (options_.namespace_prefix.empty()) {
@@ -171,33 +196,41 @@ private:
       path(slot, "status"), rclcpp::QoS(1).reliable().transient_local());
     add_command<srv::ConfigureComponent>(slot, "configure", [this, slot](const auto & req) {
         return runtime_.configure_component(slot, req.name);
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Configure, slot, {}, req.name};});
     add_command<srv::ActivateComponent>(slot, "activate", [this, slot](const auto & req) {
         return runtime_.activate_component(slot, req.name);
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Activate, slot, {}, req.name};});
     add_command<srv::DeactivateComponent>(slot, "deactivate", [this, slot](const auto & req) {
         return runtime_.deactivate_component(
           slot, req.name, std::chrono::milliseconds(req.timeout_ms)).result;
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Deactivate, slot, {}, req.name};});
     add_command<srv::CleanupComponent>(slot, "cleanup", [this, slot](const auto & req) {
         return runtime_.cleanup_component(slot, req.name);
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Cleanup, slot, {}, req.name};});
     add_command<srv::LoadComponent>(slot, "load", [this, slot](const auto & req) {
         const auto component = req.library_name.empty() ? req.component :
           resolve_library_component(req.library_name, req.component);
         return runtime_.load_component(slot, req.name, component);
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Load, slot, {}, req.name};});
     add_command<srv::UnloadComponent>(slot, "unload", [this, slot](const auto & req) {
         return runtime_.unload_component(slot, req.name, std::chrono::milliseconds(req.timeout_ms));
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Unload, slot, {}, req.name};});
     add_command<srv::ReloadComponent>(slot, "reload", [this, slot](const auto & req) {
         return runtime_.reload_component(
           slot, req.name, req.transfer_state, std::chrono::milliseconds(req.timeout_ms));
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Reload, slot, {}, req.name, req.transfer_state};});
     add_command<srv::SwitchComponents>(slot, "switch", [this, slot](const auto & req) {
         return runtime_.switch_component(
           slot, req.source, req.target, req.transfer_state, std::chrono::milliseconds(req.timeout_ms));
-      });
+      }, [slot](const auto & req) {return SlotOperation{
+          SlotOperation::Kind::Switch, slot, req.source, req.target, req.transfer_state};});
     entities.services.push_back(node_.create_service<StatusService>(
       path(slot, "get_status"),
       [this, slot](const std::shared_ptr<StatusService::Request> request,
@@ -232,20 +265,28 @@ private:
       }, rclcpp::ServicesQoS(), group_));
   }
 
-  template<class Service, class Invoke>
-  void add_command(const std::string & slot, const std::string & action, Invoke invoke)
+  template<class Service, class Invoke, class Describe>
+  void add_command(
+    const std::string & slot, const std::string & action, Invoke invoke, Describe describe)
   {
     // This common response handling does not change the distinct ROS service types.
     using Request = typename Service::Request;
     using Response = typename Service::Response;
     slots_.at(slot).services.push_back(node_.create_service<Service>(
       path(slot, action),
-      [this, slot, action, invoke = std::move(invoke)](
+      [this, slot, action, invoke = std::move(invoke), describe = std::move(describe)](
         const std::shared_ptr<Request> request, std::shared_ptr<Response> response) {
         rpp::CallbackResult result;
         try {
           check_owner();
           result = invoke(*request);
+          if (result.success && callbacks_.after_success) {
+            const auto synchronized = callbacks_.after_success(describe(*request));
+            if (!synchronized.success) {
+              result = rpp::CallbackResult::failure(
+                "Slot operation succeeded but its callback failed: " + synchronized.message);
+            }
+          }
         } catch (const std::exception & error) {
           result = rpp::CallbackResult::failure(error.what());
         } catch (...) {
@@ -280,6 +321,7 @@ private:
   rclcpp::Node & node_;
   Runtime & runtime_;
   SlotManagerRosOptions options_;
+  SlotManagerRosCallbacks callbacks_;
   std::thread::id owner_;
   bool closed_ = false;
   rclcpp::CallbackGroup::SharedPtr group_;
