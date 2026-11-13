@@ -1,0 +1,10 @@
+# New or previously unloaded slot-local registration name.
+string name
+# Nonempty selects a component within this registered RPP library.
+string library_name
+# Library component name/ID, or a workspace folder when library_name is empty.
+# With no library, an empty component reuses the registration's previous folder.
+string component
+---
+bool success
+string message

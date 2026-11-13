@@ -1,0 +1,4 @@
+---
+bool success
+string message
+rpp_ros2/SlotStatus status

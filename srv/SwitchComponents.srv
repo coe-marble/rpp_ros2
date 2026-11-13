@@ -1,0 +1,7 @@
+string source
+string target
+bool transfer_state true
+uint32 timeout_ms 1000
+---
+bool success
+string message

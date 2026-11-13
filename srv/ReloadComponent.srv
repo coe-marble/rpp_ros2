@@ -1,0 +1,6 @@
+string name
+bool transfer_state false
+uint32 timeout_ms 1000
+---
+bool success
+string message

@@ -1,0 +1,6 @@
+# False also includes unloaded registrations. Inactive loaded entries have state INACTIVE.
+bool loaded_only true
+---
+bool success
+string message
+rpp_ros2/ComponentStatus[] components

@@ -1,0 +1,6 @@
+string name
+# Maximum guarded-call drain time; lifecycle callbacks themselves are not interrupted.
+uint32 timeout_ms 1000
+---
+bool success
+string message
