@@ -11,7 +11,7 @@ from rpp_py.component_manager import ComponentManager
 from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError, LifecycleState
 from rpp_py.runtime import ScriptRuntime
 
-from rpp_ros2 import SlotManagerRos
+from rpp_ros2 import SlotManagerRos, SlotOperation
 import rpp_ros2.slot_manager_ros as ros_module
 from rpp_ros2.msg import ComponentStatus
 from rpp_ros2.srv import (
@@ -178,6 +178,30 @@ def test_lifecycle_commands_target_the_service_slot_and_publish_resulting_states
     assert contexts[0].events == ["configure", ("activate", None), "deactivate", "cleanup"]
     assert contexts[1].events == []
     assert slots["second"].get_state("primary") is LifecycleState.UNCONFIGURED
+
+
+def test_after_success_callback_observes_completed_operation():
+    context = PluginContext("primary-id")
+    slot = ComponentManager()
+    slot.adopt("primary", context, "/first/component", initial=True).require_success()
+    runtime = ScriptRuntime(ScriptContext({"first": slot}))
+    node = Node()
+    observed = []
+
+    def after_success(operation):
+        observed.append((operation, slot.get_state("primary")))
+        return CallbackResult()
+
+    helper = SlotManagerRos(node, runtime, publish_period=0, after_success=after_success)
+    try:
+        response = command(node, "configure")
+    finally:
+        helper.close()
+
+    assert response.success, response.message
+    operation, state = observed[0]
+    assert operation == SlotOperation("configure", "first", target="primary")
+    assert state is LifecycleState.INACTIVE
 
 
 def test_manager_failure_and_unknown_component_are_reported(tree):

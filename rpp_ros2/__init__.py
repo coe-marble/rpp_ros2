@@ -1,5 +1,5 @@
 """ROS 2 adapters for RPP runtimes."""
 
-from .slot_manager_ros import SlotManagerRos
+from .slot_manager_ros import SlotManagerRos, SlotOperation
 
-__all__ = ["SlotManagerRos"]
+__all__ = ["SlotManagerRos", "SlotOperation"]

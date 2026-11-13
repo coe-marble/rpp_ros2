@@ -1,4 +1,4 @@
-name: CI
+name: ROS 2 tests
 
 on:
   push:
@@ -10,12 +10,58 @@ on:
 
 permissions:
   contents: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  ci:
-    name: CI
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
+  test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/coe-marble/rpp-test-container:lyrical-ubuntu26.04-capnp1.1.0-v1
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.RPP_CI_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ROS_DISTRO: lyrical
+      # Feature branches use the main integration stack; PRs into develop use develop.
+      RPP_INTEGRATION_REF: ${{ (github.base_ref || github.ref_name) == 'develop' && 'develop' || 'main' }}
     steps:
-      - name: Complete CI
-        run: exit 0
+      - name: Check out repository under test
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - name: Check out RPP integration dependencies
+        uses: actions/checkout@v4
+        with:
+          repository: coe-marble/rpp_dev
+          ref: ${{ env.RPP_INTEGRATION_REF }}
+          path: rpp_dev
+          submodules: recursive
+          token: ${{ secrets.RPP_CI_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Overlay the repository under test
+        run: rsync -a --delete --exclude=.git candidate/ rpp_dev/src/rpp_ros2/
+      - name: Install local RPP Python packages
+        run: |
+          for package in rpp_dev/src/rpp_common rpp_dev/src/rpp_plugin_registrator rpp_dev/src/rpp_orchestrator rpp_dev/src/rpp_py rpp_dev/src/rpp_cli rpp_dev/src/rpp_testing; do
+            python -m pip install --no-deps -e "$package"
+          done
+          python -m pip install -e "rpp_dev/src/rpp_cli[test]"
+          python -m pip install -e "rpp_dev/src/rpp_testing[test]"
+      - name: Build and test rpp_ros2
+        run: |
+          source /opt/ros/lyrical/setup.bash
+          colcon build --base-paths rpp_dev/src/rpp_cpp --symlink-install --cmake-args -DBUILD_TESTING=OFF -DPython3_EXECUTABLE=/opt/rpp-test-venv/bin/python
+          source install/setup.bash
+          colcon build --base-paths rpp_dev/src/rpp_ros2 --symlink-install --cmake-args -DBUILD_TESTING=ON -DPython3_EXECUTABLE=/opt/rpp-test-venv/bin/python
+          source install/setup.bash
+          colcon test --packages-select rpp_ros2 --event-handlers console_direct+
+          colcon test-result --test-result-base build/rpp_ros2/test_results --verbose

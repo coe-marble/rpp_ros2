@@ -47,7 +47,12 @@ ament_python_install_package(${PROJECT_NAME})
 install(FILES README.md LICENSE DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+
+  ament_add_gtest(test_slot_manager_ros_cpp test/test_slot_manager_ros.cpp)
+  target_link_libraries(test_slot_manager_ros_cpp rpp_ros2_helpers rclcpp::rclcpp)
+
   ament_add_pytest_test(test_slot_manager_ros test/test_slot_manager_ros.py)
   ament_add_pytest_test(test_component_lookup test/test_component_lookup.py)
 endif()
