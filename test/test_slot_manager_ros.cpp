@@ -20,6 +20,17 @@ using namespace std::chrono_literals;
 class TestContext
 {
 public:
+  const TestContext & get_subcomponent_context(const std::string &, const std::string &) const
+  {
+    return *this;
+  }
+
+  template<class T>
+  std::shared_ptr<T> get_instance() const
+  {
+    return std::make_shared<rpp::LifecyclePlugin<void>>();
+  }
+
   std::vector<std::string> list_subcomponents() const
   {
     return {"controller", "localization"};
@@ -70,10 +81,10 @@ public:
     return transition(slot, name, rpp::LifecycleState::ACTIVE, "activate");
   }
 
-  rpp::DeactivationResult<rpp::HandoverState> deactivate_component(
+  rpp::CallbackResult deactivate_component(
     const std::string & slot, const std::string & name, std::chrono::milliseconds)
   {
-    return {transition(slot, name, rpp::LifecycleState::INACTIVE, "deactivate"), std::nullopt};
+    return transition(slot, name, rpp::LifecycleState::INACTIVE, "deactivate");
   }
 
   rpp::CallbackResult cleanup_component(const std::string & slot, const std::string & name)
@@ -98,21 +109,9 @@ public:
   }
 
   rpp::CallbackResult reload_component(
-    const std::string & slot, const std::string & name, bool, std::chrono::milliseconds)
+    const std::string & slot, const std::string & name, rpp::HandoverState, std::chrono::milliseconds)
   {
     events.push_back("reload:" + slot + "/" + name);
-    return {};
-  }
-
-  rpp::CallbackResult switch_component(
-    const std::string & slot, const std::string & source, const std::string & target,
-    bool, std::chrono::milliseconds)
-  {
-    auto & from = entries_.at(key(slot, source));
-    auto & to = entries_.at(key(slot, target));
-    from.state = rpp::LifecycleState::INACTIVE;
-    to.state = rpp::LifecycleState::ACTIVE;
-    events.push_back("switch:" + slot + "/" + source + "/" + target);
     return {};
   }
 
@@ -214,6 +213,12 @@ std::string SlotManagerRosTest::service_name<rpp_ros2::srv::ListComponents>()
   return "list_components";
 }
 
+template<>
+std::string SlotManagerRosTest::service_name<rpp_ros2::srv::SwitchComponents>()
+{
+  return "switch";
+}
+
 TEST_F(SlotManagerRosTest, CreatesIndependentServiceSetsForEachRuntimeSlot)
 {
   create_helper();
@@ -277,6 +282,41 @@ TEST_F(SlotManagerRosTest, InvokesTheOptionalCallbackAfterSuccessfulOperations)
   EXPECT_EQ(observed[0].kind, rpp_ros2::SlotOperation::Kind::Configure);
   EXPECT_EQ(observed[0].slot, "controller");
   EXPECT_EQ(observed[0].target, "primary");
+}
+
+TEST_F(SlotManagerRosTest, SwitchResolvesInstanceIdsAndRunsIndependentListsInOrder)
+{
+  ASSERT_TRUE(runtime_.configure_component("controller", "primary").success);
+  ASSERT_TRUE(runtime_.activate_component("controller", "primary").success);
+  ASSERT_TRUE(runtime_.load_component("controller", "second", "controller").success);
+  ASSERT_TRUE(runtime_.configure_component("controller", "second").success);
+  ASSERT_TRUE(runtime_.activate_component("controller", "second").success);
+  ASSERT_TRUE(runtime_.load_component("controller", "incoming", "controller").success);
+  ASSERT_TRUE(runtime_.configure_component("controller", "incoming").success);
+  create_helper();
+  runtime_.events.clear();
+
+  rpp_ros2::srv::SwitchComponents::Request request;
+  request.deactivate = {"controller-id", "second-id"};
+  request.activate = {"incoming-id"};
+  auto response = call<rpp_ros2::srv::SwitchComponents>(std::move(request));
+  ASSERT_TRUE(response->success) << response->message;
+  EXPECT_EQ(runtime_.events, (std::vector<std::string>{
+      "deactivate:controller/primary", "deactivate:controller/second", "activate:controller/incoming"}));
+}
+
+TEST_F(SlotManagerRosTest, SwitchRejectsRegistrationNamesWithoutChangingLifecycleState)
+{
+  ASSERT_TRUE(runtime_.configure_component("controller", "primary").success);
+  ASSERT_TRUE(runtime_.activate_component("controller", "primary").success);
+  create_helper();
+  runtime_.events.clear();
+
+  rpp_ros2::srv::SwitchComponents::Request request;
+  request.deactivate = {"primary"};
+  auto response = call<rpp_ros2::srv::SwitchComponents>(std::move(request));
+  EXPECT_FALSE(response->success);
+  EXPECT_TRUE(runtime_.events.empty());
 }
 
 }  // namespace

@@ -1,6 +1,6 @@
-string source
-string target
-bool transfer_state true
+# Loaded instance IDs from list_components. Lists are independent and run in order.
+string[] deactivate
+string[] activate
 uint32 timeout_ms 1000
 ---
 bool success

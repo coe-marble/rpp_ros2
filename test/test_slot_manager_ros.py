@@ -8,7 +8,7 @@ from builtin_interfaces.msg import Time
 import pytest
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rpp_py.component_manager import ComponentManager
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError, LifecycleState
+from rpp_py.lifecycle import CallbackResult, LifecycleError, LifecycleState
 from rpp_py.runtime import ScriptRuntime
 
 from rpp_ros2 import SlotManagerRos, SlotOperation
@@ -53,7 +53,7 @@ class PluginContext:
     def _deactivate(self):
         self.events.append("deactivate")
         self.active = False
-        return DeactivationResult()
+        return CallbackResult()
 
     def _cleanup(self):
         self.events.append("cleanup")
@@ -240,7 +240,9 @@ def test_list_components_identifies_inactive_switch_targets(tree):
     assert response.success
     assert {info.name: info.state for info in response.components} == {
         "alpha": ComponentStatus.ACTIVE, "beta": ComponentStatus.INACTIVE}
-    assert command(node, "switch", "models", source="alpha", target="beta").success
+    instance_ids = {info.name: info.instance_id for info in response.components}
+    assert command(node, "switch", "models", deactivate=[instance_ids["alpha"]],
+                   activate=[instance_ids["beta"]]).success
     assert {info.name: info.state for info in listed(node, "models").components} == {
         "alpha": ComponentStatus.INACTIVE, "beta": ComponentStatus.ACTIVE}
 
@@ -299,7 +301,6 @@ def test_failed_library_lookup_does_not_register_a_component(tree, monkeypatch):
 
 @pytest.mark.parametrize("action,fields", [
     ("load", {"component": "/parts/new"}), ("unload", {}), ("reload", {}),
-    ("switch", {"source": "primary", "target": "other"}),
 ])
 def test_dynamic_operations_do_not_bypass_static_slot_permissions(tree, action, fields):
     response = command(tree[0], action, **fields)
@@ -354,10 +355,17 @@ def test_invalid_timing_is_rejected_before_creating_entities(period):
     assert not node.services and not node.publishers
 
 
-def test_reentrant_group_is_rejected():
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        SlotManagerRos(Node(), ScriptRuntime(ScriptContext({})),
-                       callback_group=ReentrantCallbackGroup())
+def test_reentrant_group_is_used_for_services():
+    node = Node()
+    runtime = ScriptRuntime(ScriptContext({"empty": ComponentManager()}))
+    group = ReentrantCallbackGroup()
+    helper = SlotManagerRos(node, runtime, publish_period=0, callback_group=group)
+    try:
+        service = node.services["~/empty/get_status"]
+        assert service.group is group
+        assert service.callback(GetSlotStatus.Request(), GetSlotStatus.Response()).success
+    finally:
+        helper.close()
 
 
 def test_failed_construction_releases_partially_created_entities(monkeypatch):
